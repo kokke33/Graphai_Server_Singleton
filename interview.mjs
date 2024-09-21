@@ -13,7 +13,9 @@ process.send({ status: "ready" });
 
 let buffer = "";
 
-// 「? あなた:」から「AI: 」までの文字を削除する正規表現
+// 「? あなた:」から「★AI回答」までの文字を削除する正規表現
+//  大量の謎のレスポンスが返ってきてしまうためこれで消す
+//  GraphAIのCLI問題かと思う。
 const removePromptRegex = /\? あなた:[\s\S]*?★AI回答/g;
 
 process.on("message", (message) => {

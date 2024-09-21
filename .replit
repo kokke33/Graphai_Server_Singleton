@@ -19,3 +19,7 @@ ignorePorts = false
 [[ports]]
 localPort = 8085
 externalPort = 3000
+
+[auth]
+pageEnabled = false
+buttonEnabled = false

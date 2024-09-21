@@ -13,6 +13,7 @@ const server = createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*",
+    // origin: ["https://graph-a-iclient-kokke33.replit.app/", "https://9213dd84-a906-444f-84d0-26746298442c-00-w2hmmzt71inr.pike.replit.dev/"],
     methods: ["GET", "POST"],
     credentials: true,
   },
