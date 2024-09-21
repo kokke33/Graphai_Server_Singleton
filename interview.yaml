@@ -1,0 +1,165 @@
+version: 0.5
+nodes:
+  # 最初のプロンプト
+  First_prompt:
+    agent: stringTemplateAgent
+    params:
+      template: "\e[32mAI\e[0m: プロンプトを一緒に作りましょう。何についてのプロンプトでしょうか？"
+    console:
+      after: true
+
+  nestedsuggestIdea:
+    agent: "mapAgent"
+    inputs:
+      rows: [:First_prompt]
+    graph:
+      version: 0.5
+      loop:
+        while: :continue
+      nodes:
+        # 繰り返し定義
+        continue:
+          value: true
+          # update: :llm.choices.$0.message.content
+          update: :loopCheck.continue
+        # 最終結果の出力（nestedsuggestIdeaの結果出力なのでisResult: true）
+        information:
+          value: {}
+          update: :argumentsParser
+          isResult: true
+        # メッセージ
+        messages:
+          value:
+            - role: system
+              content: >
+                私はあなたに私のPromptエンジニアになってもらいたいと思っています。
+                あなたの目標は私が必要とする最高のPromptを作ることを手助けすることです。
+                Promptはあなた、ChatGPTによって使用されます。以下のプロセスに従ってください。
+
+                あなたの最初の反応は、Promptが何についてであるべきかを尋ねることです。
+                私は答えを提供しますが、次のステップを繰り返すことで改善する必要があります。
+
+                私の入力に基づいて、2つのセクションを生成します。
+                
+                a）改訂されたPrompt
+                （あなたが書き直したPromptを提供してください。それは明確で簡潔で、
+                あなたによって簡単に理解できるものである必要があります）
+                
+                b）質問
+                （Promptを改善するために私から必要な追加情報に関する関連する質問をしてください）
+
+                私が言うまで、あなたが追加情報を提供し、
+                改訂PromptセクションでPromptを更新するという反復プロセスを続けます。
+                その際、英語で考えて、すべて日本語で出力してください。
+                ステップバイステップで考えてください。
+                私が完成したと言うまで続けます。
+
+                「完成した」場合、、関数 'report' を呼び出してください。
+
+          update: :reducer
+        userInput:
+          agent: textInputAgent
+          params:
+            message: "あなた:"
+        userMessage:
+          agent: propertyFilterAgent
+          params:
+            inject:
+              - propId: content
+                from: 1
+          inputs:
+            - role: user
+            - :userInput
+        appendedMessages:
+          agent: pushAgent
+          inputs:
+            array: :messages
+            item: :userMessage
+
+        # LLM
+        llm:
+          # agent: groqAgent
+          # params:
+          #   model: gemma2-9b-it
+          #   model: Llama3-70b-8192
+          agent: openAIAgent
+          params:
+            # model: gpt-4o
+            model: gpt-4o-mini-2024-07-18
+            tools:
+              - type: function
+                function:
+                  name: report
+                  description: ユーザーから取得した情報を報告してください。すべて日本語になっていること。
+                  parameters:
+                    type: object
+                    properties:
+                      myPrompt:
+                        type: string
+                        description: プロンプト
+                    required:
+                      - myPrompt
+          inputs:
+            messages: :appendedMessages
+
+        # LLMの結果を配列に入れる
+        reducer:
+          agent: pushAgent
+          inputs:
+            array: :appendedMessages
+            item: :llm.choices.$0.message
+
+        # LLMの結果を画面に返却
+        output:
+          agent: stringTemplateAgent
+          params:
+            template: "\e[32m★AI回答\n\nAI\e[0m: ${0}\n"
+          console:
+            after: true
+          inputs:
+            - :llm.choices.$0.message.content
+          if: :llm.choices.$0.message.content
+
+        # 結果に対してLLMで情報追加
+        # ★★★「最後に本会話は終了させてください」が重要。そうしないと会話続けてしまってエラーとなる
+        # "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'.
+        # ↑後で分かったことだが「LLMの回答（Contents）とtool_call回答の両方が入る」ことがある。その場合に上記エラーとなる。
+        # 会話完了してtool_call呼び出したと思いきや、LLMの回答も入っている状態（例えば「完了しました。ひきつづき～」みたいな）
+        # 対策として、最初のループ判定を「:llm.choices.$0.message.content」から「loopCheck」に変更した。
+        meaning_llm:
+          # agent: groqAgent
+          # params:
+          #   model: gemma2-9b-it        
+          agent: openAIAgent
+          params:
+            model: gpt-4o-mini
+            system: >
+              あなたはプロのプロンプト作成者です。
+              このプロンプトをレビューし最適化し、結果だけを返却してください。
+          inputs:
+            prompt: :llm.choices.$0.message.tool_calls.$0.function.arguments
+          if: :llm.choices.$0.message.tool_calls
+
+        # Json形式だと「nestedsuggestIdea_result」で出力できないので
+        # いったんcopyAgentを使う
+        argumentsParser:
+          # agent: jsonParserAgent
+          agent: copyAgent
+          inputs:
+            - :llm.choices.$0.message.tool_calls.$0.function.arguments
+            # - :meaning_llm.choices.$0.message.content
+          if: :llm.choices.$0.message.tool_calls
+          # if: :meaning_llm.choices.$0.message.content
+
+        # llmのfinish_reasonを確認。tool_calls以外はfinish_reasonは「stop」となる。
+        # よって、stopの時にループするようにする
+        loopCheck:
+          agent: propertyFilterAgent
+          params:
+            # ★★equal,notEqual スペルミスすると動かない！！！★★
+            inspect:
+              - propId: continue
+                equal: "stop"
+          inputs:
+            - {}
+            - :llm.choices.$0.finish_reason
