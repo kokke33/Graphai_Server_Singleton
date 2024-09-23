@@ -1,0 +1,217 @@
+version: 0.5
+loop:
+  while: :continue
+nodes:
+  # 入力確認最新化
+  continue:
+    value: true
+    update: :checkInput.continue
+  # 入力
+  userInput:
+    agent: textInputAgent
+    params:
+      message: "あなた:"  
+    console:
+      before:
+        "\e[32mAI\e[0m: ■悩んでいること、相談したいことを教えてください"
+  # 入力が「/bye」以外なら変数continueをtrueにする
+  checkInput:
+    agent: propertyFilterAgent
+    params:
+      inspect:
+        - propId: continue
+          notEqual: /bye
+    inputs:
+      - {}
+      - :userInput
+
+  # 直近の会話まとめ。次の会話へのインプットとする。
+  summary:
+    value: []
+    update: :reducer
+    # isResult: true
+  accumulationSummary:
+    agent: stringTemplateAgent
+    params:
+      template: "\e[34m■会話まとめ:\e[0m\n\n${0}\n\n"
+    # 画面出力しないためにコメントアウト
+    # console:
+    #   after: true
+    inputs: [":summaryChat_LLM.choices.$0.message.content"]
+    # isResult: true
+  # LLMの結果を配列に入れる
+  reducer:
+    agent: pushAgent
+    inputs:
+      array: :summary
+      item: :accumulationSummary   
+
+  # アイデア検討
+  suggestIdea:
+    agent: stringTemplateAgent
+    console:
+      before: ...5個のアイデア検討中    
+    params:
+      template: >
+        ベテランのプロジェクトマネージャとして、
+        以下に関するアイデアを5個考えてください。
+        理由は改行して２文字空けてから記載してください。
+        英語で考えて、結果はすべて日本語で表示すること。
+
+        ${0}
+
+        なお、これまでの話の流れは以下の通りです。
+        ${1}
+    inputs: 
+      - :userInput
+      - :summary
+    if: :checkInput.continue
+    # isResult: true
+  suggestIdea_LLM:
+    # agent: groqAgent
+    # params:
+    #   model: Llama3-70b-8192
+      # model: llama-3.1-70b-versatile
+    agent: openAIAgent
+    params:
+      model: gpt-4o-mini   
+    inputs: 
+      prompt: :suggestIdea
+    isResult: true
+
+  # アイデアの評価
+  evaluationIdeas:
+    agent: stringTemplateAgent
+    console:
+      before: ...アイデアの評価中   
+    inputs: [":suggestIdea_LLM.choices.$0.message.content","userInput"]
+    params:
+      template: |
+        ベテランのプロジェクトマネージャとして、以下のアイデアを評価してください。
+        アイデアの後を記載後、その次の行に２文字空けてから評価内容を記載してください。
+        英語で考えて、結果はすべて日本語で表示すること。
+        [相談事]
+        ${1}
+        [アイデア]
+        ${0}
+  evaluationIdeas_LLM:
+    # agent: groqAgent
+    # params:
+    #   model: Llama3-70b-8192
+      # model: llama-3.1-70b-versatile  
+    agent: openAIAgent
+    params:
+      model: gpt-4o-mini   
+    inputs:
+      prompt: :evaluationIdeas
+    # isResult: true
+
+  # トップ３選定
+  selectTop3:
+    agent: stringTemplateAgent
+    console:
+      before: ...トップ３選定中     
+    inputs: [":suggestIdea_LLM.choices.$0.message.content", ":evaluationIdeas_LLM.choices.$0.message.content"]
+    params:
+      template: |
+        このアイデア中から最も適切で効率的なアイデアのトップ３を選定し、
+        その選定理由も説明してください。
+        英語で考えて、結果はすべて日本語。
+        [アイデア]
+        ${0}
+        [評価]
+        ${1}
+  selectTop3_LLM:
+    # agent: groqAgent
+    # params:
+    #   model: Llama3-70b-8192  
+      # model: llama-3.1-70b-versatile  
+    agent: openAIAgent
+    params:
+      # model: gpt-4o   
+      model: gpt-4o-mini   
+    inputs:
+      prompt: :selectTop3
+
+  # 最終アウトプット生成
+  output:
+    agent: stringTemplateAgent
+    inputs: [":suggestIdea_LLM.choices.$0.message.content", ":evaluationIdeas_LLM.choices.$0.message.content", ":selectTop3_LLM.choices.$0.message.content",":nextQA_LLM.choices.$0.message.content",":summaryChat_LLM.choices.$0.message.content"]
+    params:
+      # template: "\e[34m[解決策]\e[0m\n${0}\n\n\e[31m[評価]\e[0m\n${1}\n\n\e[31m[結果]\e[0m\n${2}"
+      template: "\e[34m★AI回答## [解決策とその評価]\e[0m\n${1}\n\n## \e[31m[結果]\e[0m\n\n${2}\n\n## \e[31m[まとめ]\e[0m\n\n${4}\n\n## \e[31m[次の質問候補]\e[0m\n${3}\n"
+    console:
+      after: true
+
+  # 次の質問生成
+  nextQA:
+    agent: stringTemplateAgent
+    if: :selectTop3_LLM
+    console:
+      before: ...次の質問作成中  
+    inputs: [":userInput",":selectTop3_LLM.choices.$0.message.content"]
+    params:
+      template: |
+        "
+        あなたは経験豊富な相談者です。
+        アドバイザーから提示された[対応案]を実施するにあたり、具体的で重要な質問を5つ厳選して提示してください。
+        以下の点に注意してください：
+
+        1.各質問は簡潔かつ明確に表現すること。
+        2.質問は[対応案]の実施に直接関連し、重要な情報を引き出すものであること。
+        3.空白行は使用せず、質問は連続して表示すること。
+        4.結果はすべて日本語で表示すること。
+
+
+        [対応案]
+        ${1}
+        "
+  nextQA_LLM:
+    # agent: groqAgent
+    # params:
+    #   model: llama-3.1-70b-versatile  
+    agent: openAIAgent
+    params:
+      model: gpt-4o-mini  
+    inputs:
+      prompt: :nextQA
+
+  # トップ３選定結果を１つの文章にまとめる
+  summaryChat:
+    agent: stringTemplateAgent
+    inputs: [":userInput",":selectTop3_LLM.choices.$0.message.content"]
+    params:
+      template: |
+        "あなたは文章推敲のスペシャリストです。
+        以下の相談事と対応策について、第三者が見たときにわかるように
+        １つの文章にまとめてください。
+        結果はすべて日本語で表示すること。
+        "
+        [相談事]
+        ${0}
+        [対応策]
+        ${1}
+        "
+  summaryChat_LLM:
+    # agent: groqAgent
+    # params:
+    #   model: Llama3-70b-8192  
+      # model: llama-3.1-70b-versatile  
+    agent: openAIAgent
+    params:
+      # model: gpt-4o
+      model: gpt-4o-mini
+    inputs:
+      prompt: :summaryChat
+
+  # これまでの会話の流れ
+  matome:
+    agent: stringTemplateAgent
+    console:
+      after: true    
+    inputs:
+      - :summary
+      - :output
+    if: :summary
+    params:
+      template: "\e[34m## [これまでの会話の流れ]\e[0m\n\n${0}\n"
