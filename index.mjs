@@ -31,7 +31,7 @@ function log(message, level = "info") {
 }
 
 // タイムアウト設定（ミリ秒）
-const INACTIVITY_LIMIT = 300000; // 5分
+const INACTIVITY_LIMIT = 600000; // 10:分
 
 /**
  * ネームスペースごとに処理を設定する関数
