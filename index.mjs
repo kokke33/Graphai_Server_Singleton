@@ -1,4 +1,3 @@
-// index.mjs
 import { fork } from "child_process";
 import express from "express";
 import { createServer } from "http";
@@ -231,6 +230,9 @@ setupNamespace("create", "interview.mjs");
 
 // 「AI回答」用のネームスペースを設定
 setupNamespace("answer", "interview2.mjs");
+
+// `sechat` 用のネームスペースを設定
+setupNamespace("sechat", "interview3.mjs");
 
 // エラーハンドリングミドルウェア
 app.use((err, req, res, __next) => {

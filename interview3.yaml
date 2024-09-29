@@ -1,0 +1,288 @@
+version: 0.5
+# ループ処理
+loop:
+  # continueがTrueとなる間
+  while: :continue
+nodes:
+  # 入力確認最新化
+  continue:
+    value: true
+    update: :checkInput.continue
+  # 入力
+  userInput:
+    agent: textInputAgent
+    params:
+      message: "あなた:"  
+    console:
+      before: "\e[32mAI\e[0m: 相談したいことを教えてください。\n\n
+        仮想ベテランプロマネと仮想新人SEが会話を始めます。（７ターン）。\n\n
+        AI同士が会話した結果を出力するので30秒ほど時間がかかります。"
+  # 入力が「/bye」以外なら変数continueをtrueにする
+  checkInput:
+    agent: propertyFilterAgent
+    params:
+      inspect:
+        - propId: continue
+          notEqual: /bye
+    inputs:
+      - {}
+      - :userInput
+
+  # 直近の会話まとめ。次の会話へのインプットとする。
+  summary:
+    value: []
+    update: :reducer
+    isResult: true
+  accumulationSummary:
+    agent: stringTemplateAgent
+    params:
+      template: "\e[34m会話まとめ:\e[0m ${0}\n"
+    # 画面出力しないためにコメントアウト
+    # console:
+    #   after: true
+    inputs: [":summaryChat.result_llm"]
+    # isResult: true
+  # LLMの結果を配列に入れる
+  reducer:
+    agent: pushAgent
+    inputs:
+      array: :summary
+      item: :accumulationSummary   
+
+  # LLM渡すコンテキストレイアウト
+  context:
+    agent: stringTemplateAgent
+    params:
+      template:
+        person0:
+          name: プロジェクトマネージャ
+          system: >
+            あなたは数多くのシステム開発プロジェクトを成功させてきた
+            ベテランのプロジェクトマネージャーです。
+            相談者の悩みを聞き、成功に導くのがあなたの仕事です。
+            相談者を引きつけるため、一つ一つ質問を投げかけ、
+            次の話題に移る前に相談者の答えに対して反応してください。
+            回答は以下4点注意してください。
+
+              1.回答は100字以内であること。
+              2.日本語であること。
+              3.改行は入れないこと。
+            
+            前回までの会話の流れは以下の通り。
+            #前回までの会話
+            ${1}
+        person1:
+          name: 相談者
+          system: >
+            あなたは仕事に悩んでいるシステムエンジニアです。
+            回答は以下3点注意してください。
+            
+              1.100字以内で、会話の文章として日本語で回答すること
+              2.改行は入れないこと。
+              
+          greeting: 私は ${0} について相談したい。
+    inputs:
+      - :userInput
+      - :summary
+
+  # messageの定義
+  messages:
+    agent: propertyFilterAgent
+    params:
+      inject:
+        - index: 0
+          propId: content
+          from: 1
+        - index: 1
+          propId: content
+          from: 2
+    inputs:
+      - - role: system
+        - role: user
+      - :context.person0.system
+      - :context.person1.greeting
+
+  #チャット本体
+  chat:
+    agent: nestedAgent
+    # nestedAgentのインプットは２つあって、揃ってないと動かない
+    inputs:
+      messages: :messages
+      context: :context
+    console:
+      before: "★AI回答 \n ## ■会話内容"
+    if: :checkInput.continue
+      # - :userInput
+    # inputsに対して名前を付ける。設定しない場合は「$0、$1...」となる。
+    # params:
+    #   namedInputs:
+    #     - messages
+    #     - context
+    # 入れ子の処理
+    graph:
+      loop:
+        # ループ回数
+        count: 7
+      nodes:
+        messages:
+          value: []
+          update: :swappedMessages
+        context:
+          value: {}
+          update: :swappedContext
+        llm:
+          agent: openAIAgent
+          params:
+            model: gpt-4o-mini
+            # model: gpt-4o
+            # model: gpt-3.5-turbo
+          # agent: geminiAgent
+            # model: gemini-1.5-pro
+          # agent: groqAgent
+          # params:
+            # model: llama-3.1-70b-versatile
+            # model: llama-3.1-405b-reasoning
+            # model: llama3-groq-70b-8192-tool-use-preview
+            # model: Llama3-70b-8192
+            # model: gemma2-9b-it
+            # model: Llama3-8b-8192
+          inputs:
+            messages: :messages
+        output:
+          agent: stringTemplateAgent
+          params:
+            template: "\e[34m> **${1}:\e[0m** \n\n　${0}\n"
+            # template: "\e[34m>${1}:【${2}】\e[0m\n${0}\n"
+          console:
+            after: true
+          inputs:
+            - :llm.choices.$0.message.content
+            - :context.person0.name
+            - :llm.model
+        reducer:
+          agent: pushAgent
+          inputs:
+            array: :messages
+            item: :llm.choices.$0.message
+          isResult: true
+        swappedContext:
+          agent: propertyFilterAgent
+          params:
+            swap:
+              person0: person1
+          inputs:
+            - :context
+        swappedMessages:
+          agent: propertyFilterAgent
+          params:
+            inject:
+              - propId: content
+                index: 0
+                from: 1
+            alter:
+              role:
+                assistant: user
+                user: assistant
+          inputs:
+            - :reducer
+            - :swappedContext.person0.system  
+
+  # 最初のネストノードの結果をインプットにした処理
+  # nestedNode1_result:
+  #   agent: "bypassAgent"
+  #   inputs: [":chat.reducer"]
+
+  # json形式のデータを元に戻す
+  # ※次のnestedNode2で引数に与えられないため
+  restore_json:
+    agent: jsonParserAgent
+    params:
+      stringify: true
+    isResult: true
+    inputs:
+      - ":chat.reducer"
+
+ # その結果を受けて、まとめの作成
+  summaryChat:
+    agent: "mapAgent"
+    inputs: 
+      # rows: [:chat.reducer]
+      rows: [:restore_json]
+    graph:
+      version: 0.5
+      nodes:
+        prompt:
+          agent: "stringTemplateAgent"
+          params:
+            template: > 
+              日本語で400字程度に要約してください。
+              要約の結果だけを回答してください。
+              "${0}"
+          inputs: [:row]
+        # まとめ用のLLM
+        llm:
+          agent: openAIAgent
+          params:
+            model: gpt-4o-mini      
+            # model: gpt-4o        
+          # agent: geminiAgent
+          # agent: groqAgent
+          # params:
+            # model: gemma2-9b-it
+            # model: Llama3-70b-8192
+          inputs: 
+            prompt: :prompt
+        result_llm:
+          agent: copyAgent
+          inputs: [:llm.choices.$0.message.content]   
+          isResult: true
+        summarize:
+          agent: "stringTemplateAgent"
+          params:
+            template: "\e[31m## ■まとめ:\e[0m\n\n${0}\n"
+            # template: "\e[31mまとめ【${1}】:\e[0m\n${0}\n"
+          inputs: [:result_llm,:llm.model]
+          console:
+            after: true
+
+ # その結果を受けて、次の質問の作成
+  nextfQuestionMake:
+    agent: "mapAgent"
+    inputs: 
+      rows: [:restore_json]
+    if: :summaryChat
+    graph:
+      version: 0.5
+      nodes:
+        prompt:
+          agent: "stringTemplateAgent"
+          params:
+            template: > 
+              user（相談者）とassistant（ベテランのプロジェクトマネージャ）
+              の会話を基に、最後にuserが質問すべき質問を5個考えてください。
+              結果のみ100文字以内の日本語で回答してください。
+              #インプット情報
+              "${0}"
+          inputs: [:row]
+        llm:
+          agent: openAIAgent
+          params:
+            model: gpt-4o-mini
+          # agent: geminiAgent
+          # agent: groqAgent
+          # params:
+          #   model: gemma2-9b-it
+            # model: Llama3-70b-8192
+          inputs: 
+            prompt: :prompt
+        result_llm:
+          agent: copyAgent
+          inputs: [:llm.choices.$0.message.content]   
+        summarize:
+          agent: "stringTemplateAgent"
+          params:
+            template: "\e[31m## ■質問候補:\e[0m\n${0}\n"
+            # template: "\e[31m【質問候補】【${1}】:\e[0m\n${0}\n"
+          inputs: [:result_llm,:llm.model]
+          console:
+            after: true

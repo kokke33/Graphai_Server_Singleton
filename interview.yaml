@@ -4,7 +4,10 @@ nodes:
   First_prompt:
     agent: stringTemplateAgent
     params:
-      template: "\e[32mAI\e[0m: プロンプトを一緒に作りましょう。何についてのプロンプトでしょうか？"
+          template:
+            "\e[32mAI\e[0m: AIに投げかける質問分を一緒に作りましょう。
+            最初は大雑把でも構いません。\n\n何についての相談（質問）ですか？\n\n
+            例）ダイエットについて、試験勉強について、部下の残業時間を減らしたい など…。"
     console:
       after: true
 
