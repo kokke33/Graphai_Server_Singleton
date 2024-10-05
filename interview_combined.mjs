@@ -1,4 +1,4 @@
-// interview3.mjs
+// interview_combined.mjs
 import { spawn } from "child_process";
 import stripAnsi from "strip-ansi";
 
@@ -9,27 +9,44 @@ function removeAnsiEscapeCodes(text) {
 
 let interviewProcess;
 
-// 親プロセスに準備完了を通知
-process.send({ status: "ready" });
-
-let buffer = "";
-
-// 「? あなた:」から「AI: 」までの文字を削除する正規表現
-const removePromptRegex = /\? あなた:[\s\S]*?★AI回答/g;
+// 親プロセスからネームスペース情報を受け取る
+let namespace = null;
 
 process.on("message", (message) => {
+  if (message.namespace) {
+    namespace = message.namespace;
+  }
+
   if (message.message === "start_interview") {
-    console.log("インタビューを開始します。");
+    console.log(`インタビューを開始します。ネームスペース: ${namespace}`);
 
     // 子プロセスでインタビューを開始
     const graphaiCommand = "graphai"; // 必要に応じて絶対パスに変更
-    const args = ["./interview3.yaml"];
+
+    // ネームスペースに応じて適切なYAMLファイルを選択
+    const yamlFileMap = {
+      create: "./interview.yaml",
+      answer: "./interview2.yaml",
+      sechat: "./interview3.yaml",
+    };
+
+    const yamlFile = yamlFileMap[namespace];
+
+    if (!yamlFile) {
+      const errorMessage = `不明なネームスペース: ${namespace}`;
+      console.error(errorMessage);
+      process.send({ response: errorMessage });
+      return;
+    }
+
+    const args = [yamlFile];
 
     interviewProcess = spawn(graphaiCommand, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, TERM: "dumb" },
     });
 
+    // 以下、既存のイベントハンドリングコードをそのまま使用
     // エラーイベントのハンドリング
     interviewProcess.on("error", (error) => {
       const errorMessage = `子プロセスエラー: ${error.message}`;
@@ -38,6 +55,11 @@ process.on("message", (message) => {
     });
 
     // データのバッファリングと組み立て
+    let buffer = "";
+
+    // 「? あなた:」から「AI: 」までの文字を削除する正規表現
+    const removePromptRegex = /\? あなた:[\s\S]*?★AI回答/g;
+
     interviewProcess.stdout.on("data", (data) => {
       buffer += data.toString();
 
@@ -95,3 +117,6 @@ process.on("error", (error) => {
   console.error(errorMessage);
   process.send({ response: errorMessage });
 });
+
+// 親プロセスに準備完了を通知
+process.send({ status: "ready" });
