@@ -1,10 +1,10 @@
 // index.mjs
-import { fork } from "child_process";
 import express from "express";
 import { createServer } from "http";
-import { dirname, join } from "path";
+import { join, dirname } from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
+import ProcessPool from "./processPool.mjs"; // プロセスプールをインポート
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +14,7 @@ const SOCKET_IO_PORT = 8085;
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ["https://graphai2.web.app", "https://9213dd84-a906-444f-84d0-26746298442c-00-w2hmmzt71inr.pike.replit.dev:5173"],
+    origin: "*",
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -31,6 +31,11 @@ function log(message, level = "info") {
 
 // タイムアウト設定（ミリ秒）
 const INACTIVITY_LIMIT = 600000; // 10分
+
+// プロセスプールの初期化
+const poolSize = 50; // プール内のプロセス数（適宜調整してください）
+const scriptPath = join(__dirname, "interview_combined.mjs");
+const processPool = new ProcessPool(poolSize, scriptPath);
 
 /**
  * ネームスペースごとに処理を設定する関数
@@ -49,13 +54,11 @@ function setupNamespace(namespace) {
       return;
     }
 
-    log(`新しいユーザーが接続しました [${namespace}]: ${socket.id} (ログインID: ${loginID})`);
+    log(
+      `新しいユーザーが接続しました [${namespace}]: ${socket.id} (ログインID: ${loginID})`
+    );
 
-    let interviewProcess = null;
     let inactivityTimeout = null;
-
-    // インタビュー完了フラグ
-    let interviewCompleted = false;
 
     // 非アクティブタイムアウトをリセットする関数
     const resetInactivityTimeout = () => {
@@ -83,7 +86,7 @@ function setupNamespace(namespace) {
         `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュー開始リクエストを受信しました [${namespace}]`
       );
 
-      if (interviewProcess) {
+      if (socket.interviewProcess) {
         log(
           `[ユーザー ${socket.id} (ログインID: ${loginID})] 既にインタビューが開始されています [${namespace}]`,
           "warn"
@@ -93,130 +96,66 @@ function setupNamespace(namespace) {
       }
 
       try {
-        const scriptPath = join(__dirname, "interview_combined.mjs");
+        // プロセスプールからプロセスを取得
+        const interviewProcess = await processPool.acquire();
+        log(`プロセスプールから子プロセスを取得しました。Process PID: ${interviewProcess.pid}`);
 
-        log(
-          `[ユーザー ${socket.id} (ログインID: ${loginID})] スクリプトでインタビュープロセスを開始します: ${scriptPath} [${namespace}]`
-        );
-        interviewProcess = fork(scriptPath, [], {
-          stdio: ["pipe", "pipe", "pipe", "ipc"],
-          execArgv: ["--experimental-modules"],
-        });
-
-        if (!interviewProcess) {
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュープロセスの起動に失敗しました [${namespace}]`,
-            "error"
-          );
-          socket.emit(
-            "interview_result",
-            "エラー: インタビュープロセスの起動に失敗しました"
-          );
-          return;
-        }
-
-        // 子プロセスにネームスペース情報を送信
-        interviewProcess.send({ namespace });
-
-        // エラーハンドリング
-        interviewProcess.on("error", (err) => {
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスの起動に失敗しました: ${err.message} [${namespace}]`,
-            "error"
-          );
-          socket.emit(
-            "interview_result",
-            `エラー: 子プロセスの起動に失敗しました: ${err.message}`
-          );
-          // 接続を切断
-          socket.disconnect(true);
-        });
+        // 子プロセスにネームスペースとメッセージを送信
+        const initMessage = { namespace, message: "start_interview" };
+        log(`子プロセスにメッセージを送信します: ${JSON.stringify(initMessage)}`);
+        interviewProcess.send(initMessage);
 
         // 子プロセスからのメッセージを処理
-        interviewProcess.on("message", (response) => {
+        const messageHandler = (response) => {
+          log(`親プロセスが子プロセスからのメッセージを受信: ${JSON.stringify(response)}`);
+
           if (response.status === "ready") {
-            log(
-              `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスの準備ができました [${namespace}]`
-            );
-            // 子プロセスに開始メッセージを送信
-            interviewProcess.send({ message: "start_interview" });
-          } else if (response.status === "completed") {
-            // インタビュー完了のメッセージ
-            log(
-              `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビューが完了しました: ${JSON.stringify(
-                response
-              )} [${namespace}]`
-            );
-            socket.emit(
-              "interview_result",
-              "インタビューが完了しました。接続を終了します。"
-            );
-            interviewCompleted = true;
-            socket.disconnect(true); // 接続を切断
+            // 子プロセスの準備完了
+            log(`[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスの準備ができました [${namespace}]`);
           } else if (response.response) {
-            // 子プロセスからの通常のメッセージ
-            log(
-              `[ユーザー ${socket.id} (ログインID: ${loginID})] メッセージ受信: ${JSON.stringify(
-                response
-              )} [${namespace}]`
-            );
-
-            const messageToSend = response.response.trim();
-            if (messageToSend !== "") {
-              socket.emit("interview_result", messageToSend);
-            }
-          } else {
-            log(
-              `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスからの不明なメッセージ: ${JSON.stringify(
-                response
-              )} [${namespace}]`,
-              "warn"
-            );
+            // クライアントにメッセージを送信
+            log(`[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスからのメッセージ: ${response.response}`);
+            socket.emit("interview_result", response.response.trim());
           }
-        });
+        };
 
-        // 子プロセスの終了を処理
-        interviewProcess.on("exit", (code, signal) => {
+        // エラーハンドリング
+        const errorHandler = (err) => {
           log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュープロセスがコード${code}とシグナル${signal}で終了しました [${namespace}]`
+            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスエラー: ${err.message} [${namespace}]`,
+            "error"
           );
-          if (!interviewCompleted) {
-            socket.emit(
-              "interview_result",
-              `インタビュープロセスが予期せず終了しました。`
-            );
-            socket.disconnect(true);
-          }
-        });
+          socket.emit("interview_result", `エラー: 子プロセスエラー: ${err.message}`);
+          socket.disconnect(true);
+        };
+
+        // 子プロセスの終了時の処理
+        const exitHandler = (code, signal) => {
+          log(
+            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスが終了しました。コード: ${code}, シグナル: ${signal} [${namespace}]`,
+            "warn"
+          );
+          socket.emit("interview_result", "インタビュープロセスが終了しました。");
+          socket.disconnect(true);
+        };
+
+        // イベントハンドラを登録
+        interviewProcess.on("message", messageHandler);
+        interviewProcess.on("error", errorHandler);
+        interviewProcess.on("exit", exitHandler);
+
+        // ソケットにプロセスとハンドラを保存（切断時に使用）
+        socket.interviewProcess = interviewProcess;
+        socket.messageHandler = messageHandler;
+        socket.errorHandler = errorHandler;
+        socket.exitHandler = exitHandler;
       } catch (error) {
+        // エラーハンドリング
         log(
-          `[ユーザー ${socket.id} (ログインID: ${loginID})] 実行中にエラーが発生しました:`,
+          `[ユーザー ${socket.id} (ログインID: ${loginID})] エラーが発生しました: ${error.message}`,
           "error"
         );
-        if (error instanceof Error) {
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] エラーメッセージ: ${error.message} [${namespace}]`,
-            "error"
-          );
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] スタックトレース: ${error.stack} [${namespace}]`,
-            "error"
-          );
-          socket.emit("interview_result", `エラー: ${error.message}`);
-        } else {
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] 不明なエラー: ${String(
-              error
-            )} [${namespace}]`,
-            "error"
-          );
-          socket.emit("interview_result", "不明なエラーが発生しました");
-        }
-        log(
-          `[ユーザー ${socket.id} (ログインID: ${loginID})] 現在のPATH: ${process.env.PATH}`,
-          "info"
-        );
-        socket.disconnect(true);
+        socket.emit("interview_result", `エラー: ${error.message}`);
       }
     });
 
@@ -235,11 +174,19 @@ function setupNamespace(namespace) {
         return;
       }
 
-      if (interviewProcess) {
-        log(
-          `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュープロセスにメッセージ"${message}"を書き込みます [${namespace}]`
-        );
-        interviewProcess.send({ message });
+      if (socket.interviewProcess) {
+        // 子プロセスが終了していないか確認
+        if (socket.interviewProcess.connected) {
+          // メッセージを送信
+          socket.interviewProcess.send({ message });
+          log(`子プロセスにメッセージを送信しました: ${message}`);
+        } else {
+          log(
+            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスとの接続が切れています [${namespace}]`,
+            "error"
+          );
+          socket.emit("interview_result", "エラー: インタビュープロセスとの通信ができません。");
+        }
       } else {
         log(
           `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュープロセスが利用できません [${namespace}]`,
@@ -256,18 +203,26 @@ function setupNamespace(namespace) {
       log(
         `[ユーザー ${socket.id} (ログインID: ${loginID})] ユーザーが切断しました [${namespace}]`
       );
-      if (interviewProcess) {
-        interviewProcess.kill();
-        log(
-          `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュープロセスを終了しました [${namespace}]`
-        );
+
+      if (socket.interviewProcess) {
+        // イベントハンドラを解除
+        socket.interviewProcess.off("message", socket.messageHandler);
+        socket.interviewProcess.off("error", socket.errorHandler);
+        socket.interviewProcess.off("exit", socket.exitHandler);
+
+        // 子プロセスを解放
+        processPool.release(socket.interviewProcess);
+
+        // 参照を削除
+        socket.interviewProcess = null;
+        socket.messageHandler = null;
+        socket.errorHandler = null;
+        socket.exitHandler = null;
       }
       if (inactivityTimeout) {
         clearTimeout(inactivityTimeout);
       }
     });
-
-    // その他のイベントハンドラがあればここに追加
   });
 }
 

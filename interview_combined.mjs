@@ -7,14 +7,20 @@ function removeAnsiEscapeCodes(text) {
   return stripAnsi(text);
 }
 
+// 子プロセス起動時のログ
+console.log("interview_combined.mjs が起動しました。");
+
 let interviewProcess;
 
 // 親プロセスからネームスペース情報を受け取る
 let namespace = null;
 
 process.on("message", (message) => {
+  console.log(`子プロセスでメッセージを受信: ${JSON.stringify(message)}`);
+
   if (message.namespace) {
     namespace = message.namespace;
+    console.log(`ネームスペースを設定: ${namespace}`);
   }
 
   if (message.message === "start_interview") {
@@ -41,17 +47,25 @@ process.on("message", (message) => {
 
     const args = [yamlFile];
 
+    console.log(`graphaiコマンドを実行します。Command: ${graphaiCommand}, Args: ${args}`);
+
     interviewProcess = spawn(graphaiCommand, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, TERM: "dumb" },
+      env: process.env, // 親プロセスの環境変数を継承
     });
 
-    // 以下、既存のイベントハンドリングコードをそのまま使用
     // エラーイベントのハンドリング
     interviewProcess.on("error", (error) => {
       const errorMessage = `子プロセスエラー: ${error.message}`;
       console.error(errorMessage);
       process.send({ response: errorMessage });
+    });
+
+    // プロセスが終了した場合のハンドリング
+    interviewProcess.on("exit", (code, signal) => {
+      const exitMessage = `graphaiプロセスが終了しました。コード: ${code}, シグナル: ${signal}`;
+      console.error(exitMessage);
+      process.send({ response: exitMessage });
     });
 
     // データのバッファリングと組み立て
@@ -76,6 +90,7 @@ process.on("message", (message) => {
         if (outputMessage) {
           // 完全なメッセージを親プロセスに送信
           process.send({ response: outputMessage });
+          console.log(`親プロセスにメッセージを送信: ${outputMessage}`);
         }
 
         // バッファをクリア
@@ -92,30 +107,29 @@ process.on("message", (message) => {
       }
     });
 
-    // プロセス終了のイベントを親プロセスに送信
-    interviewProcess.on("close", (code) => {
-      const closeMessage = `インタビュープロセスが終了コード ${code} で終了しました`;
-      console.log(closeMessage);
-      process.send({ response: closeMessage });
-    });
   } else if (message.message) {
     // ユーザー入力を子プロセスに送信
     if (interviewProcess && interviewProcess.stdin.writable) {
       console.log("子プロセスに書き込み:", message.message);
       interviewProcess.stdin.write(`${message.message}\n`);
     } else {
-      console.error("子プロセスのstdinに書き込めませんでした。");
+      const errorMessage = "インタビュープロセスが利用できません。";
+      console.error(errorMessage);
+      process.send({ response: errorMessage });
     }
   } else {
     console.log("不明なメッセージを受信:", message);
   }
 });
 
-// 子プロセスのエラーハンドリング
-process.on("error", (error) => {
-  const errorMessage = `プロセスエラー: ${error.message}`;
-  console.error(errorMessage);
-  process.send({ response: errorMessage });
+// 子プロセスの未処理の例外をキャッチ
+process.on("uncaughtException", (err) => {
+  console.error(`子プロセスで未処理の例外が発生: ${err.message}`);
+});
+
+// 子プロセスの終了イベントをハンドリング
+process.on("exit", (code) => {
+  console.log(`子プロセスが終了しました。コード: ${code}`);
 });
 
 // 親プロセスに準備完了を通知
