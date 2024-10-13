@@ -24,7 +24,9 @@ class SingletonAI {
     proc.on("message", this.handleMessage.bind(this));
 
     proc.on("exit", (code, signal) => {
-      console.error(`シングルトンAIプロセスが終了しました。コード: ${code}, シグナル: ${signal}`);
+      console.error(
+        `シングルトンAIプロセスが終了しました。コード: ${code}, シグナル: ${signal}`,
+      );
       // プロセスが終了した場合、再起動
       setTimeout(() => {
         console.log("シングルトンAIプロセスを再起動します...");
@@ -33,7 +35,9 @@ class SingletonAI {
     });
 
     proc.on("error", (error) => {
-      console.error(`シングルトンAIプロセスでエラーが発生しました: ${error.message}`);
+      console.error(
+        `シングルトンAIプロセスでエラーが発生しました: ${error.message}`,
+      );
     });
 
     return proc;
@@ -56,8 +60,10 @@ class SingletonAI {
       const callback = this.callbacks.get(sessionId);
       if (error) {
         callback.reject(error);
+        console.log(`セッションID ${sessionId} のエラー: ${error}`);
       } else {
         callback.resolve(response);
+        console.log(`セッションID ${sessionId} のレスポンス: ${response}`);
       }
       this.callbacks.delete(sessionId);
       this.currentLoad--;
@@ -68,32 +74,46 @@ class SingletonAI {
 
   sendMessage(sessionId, message) {
     return new Promise((resolve, reject) => {
-      // タイムアウト処理（例：60秒）
+      // タイムアウト処理（例：30秒）
       const timeout = setTimeout(() => {
         if (this.callbacks.has(sessionId)) {
           this.callbacks.delete(sessionId);
           reject(new Error("AIプロセスからの応答がタイムアウトしました。"));
           this.currentLoad--;
+          console.warn(
+            `セッションID ${sessionId} のタイムアウトが発生しました。`,
+          );
         }
-      }, 60000);
+      }, 30000);
 
       // Promiseが解決または拒否されたときにタイムアウトをクリア
       const wrappedResolve = (value) => {
         clearTimeout(timeout);
         resolve(value);
         this.currentLoad--;
+        console.log(
+          `セッションID ${sessionId} のコールバックが解決されました。`,
+        );
       };
 
       const wrappedReject = (reason) => {
         clearTimeout(timeout);
         reject(reason);
         this.currentLoad--;
+        console.log(
+          `セッションID ${sessionId} のコールバックが拒否されました。理由: ${reason}`,
+        );
       };
 
       // コールバックを1回だけ設定
-      this.callbacks.set(sessionId, { resolve: wrappedResolve, reject: wrappedReject });
+      this.callbacks.set(sessionId, {
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+      });
+      console.log(`セッションID ${sessionId} のコールバックを登録しました。`);
       this.process.send({ sessionId, ...message });
       this.currentLoad++;
+      console.log(`セッションID ${sessionId} にメッセージを送信しました。`);
     });
   }
 
@@ -139,7 +159,7 @@ class ProcessManager {
 
 // プロセスマネージャーのインスタンスを作成
 const scriptPath = join(__dirname, "interview_combined.mjs");
-const poolSize = 3; // プロセスプールのサイズ（必要に応じて調整）
+const poolSize = 30; // プロセスプールのサイズ（必要に応じて調整）
 const processManager = new ProcessManager(scriptPath, poolSize);
 
 // エクスポート

@@ -19,11 +19,12 @@ process.on("message", (message) => {
   if (command === "start_interview") {
     if (interviewProcessMap.has(sessionId)) {
       process.send({ sessionId, error: "既にインタビューが開始されています。" });
+      console.log(`既にインタビューが開始されています。Session ID: ${sessionId}`);
       return;
     }
 
     // GraphAIコマンドの設定（必要に応じてパスを変更）
-    const graphaiCommand = "graphai";
+    const graphaiCommand = "graphai"; // フルパスを指定することを推奨
     const yamlFileMap = {
       create: "./interview.yaml",
       answer: "./interview2.yaml",
@@ -41,9 +42,25 @@ process.on("message", (message) => {
     const args = [yamlFile];
     console.log(`graphaiコマンドを実行します。Command: ${graphaiCommand}, Args: ${args}`);
 
-    const aiProcess = spawn(graphaiCommand, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+    let aiProcess;
+    try {
+      aiProcess = spawn(graphaiCommand, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: process.env,
+      });
+      console.log(`graphaiプロセスを起動しました。PID: ${aiProcess.pid}`);
+    } catch (err) {
+      const errorMessage = `graphaiの起動に失敗しました: ${err.message}`;
+      console.error(errorMessage);
+      process.send({ sessionId, error: errorMessage });
+      return;
+    }
+
+    // エラー発生時のハンドリング
+    aiProcess.on("error", (err) => {
+      const errorMessage = `graphaiプロセスでエラーが発生しました: ${err.message}`;
+      console.error(errorMessage);
+      process.send({ sessionId, error: errorMessage });
     });
 
     // データのバッファリング
@@ -54,6 +71,7 @@ process.on("message", (message) => {
 
     aiProcess.stdout.on("data", (data) => {
       buffer += data.toString();
+      console.log(`graphai stdout: ${data.toString()}`); // 追加
 
       // ANSIエスケープコードを削除
       let cleanBuffer = removeAnsiEscapeCodes(buffer);
@@ -78,8 +96,8 @@ process.on("message", (message) => {
 
     aiProcess.stderr.on("data", (data) => {
       const stderrMessage = removeAnsiEscapeCodes(data.toString()).trim();
+      console.error(`graphai stderr: ${stderrMessage}`); // 追加
       if (stderrMessage) {
-        console.error(`stderr: ${stderrMessage}`);
         process.send({ sessionId, error: stderrMessage });
       }
     });
@@ -94,6 +112,7 @@ process.on("message", (message) => {
     // プロセスをマップに保存
     interviewProcessMap.set(sessionId, aiProcess);
     process.send({ sessionId, response: "インタビューが開始されました。" });
+    console.log(`インタビュー開始が完了しました。Session ID: ${sessionId}`);
   } else if (command === "user_input") {
     const aiProcess = interviewProcessMap.get(sessionId);
     if (aiProcess && aiProcess.stdin.writable) {
@@ -110,6 +129,7 @@ process.on("message", (message) => {
       aiProcess.kill();
       interviewProcessMap.delete(sessionId);
       process.send({ sessionId, response: "インタビューが終了しました。" });
+      console.log(`インタビューが終了しました。Session ID: ${sessionId}`);
     }
   } else {
     console.log("不明なコマンドを受信:", message);
