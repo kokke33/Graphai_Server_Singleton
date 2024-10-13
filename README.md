@@ -17,3 +17,8 @@ origin: [
   "https://9213dd84-a906-444f-84d0-26746298442c-00-w2hmmzt71inr.pike.replit.dev:5173",
 ],
 ```
+
+##サーバー起動
+```
+node index.mjs
+```
