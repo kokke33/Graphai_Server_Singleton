@@ -4,7 +4,8 @@ import { createServer } from "http";
 import { join, dirname } from "path";
 import { Server } from "socket.io";
 import { fileURLToPath } from "url";
-import ProcessPool from "./processPool.mjs"; // プロセスプールをインポート
+import processManager from "./processManager.js"; // プロセスマネージャーをインポート
+import { v4 as uuidv4 } from "uuid"; // 一意のセッションID生成用
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,11 +32,6 @@ function log(message, level = "info") {
 
 // タイムアウト設定（ミリ秒）
 const INACTIVITY_LIMIT = 600000; // 10分
-
-// プロセスプールの初期化
-const poolSize = 50; // プール内のプロセス数（適宜調整してください）
-const scriptPath = join(__dirname, "interview_combined.mjs");
-const processPool = new ProcessPool(poolSize, scriptPath);
 
 /**
  * ネームスペースごとに処理を設定する関数
@@ -86,7 +82,7 @@ function setupNamespace(namespace) {
         `[ユーザー ${socket.id} (ログインID: ${loginID})] インタビュー開始リクエストを受信しました [${namespace}]`
       );
 
-      if (socket.interviewProcess) {
+      if (socket.interviewSessionId) {
         log(
           `[ユーザー ${socket.id} (ログインID: ${loginID})] 既にインタビューが開始されています [${namespace}]`,
           "warn"
@@ -96,61 +92,20 @@ function setupNamespace(namespace) {
       }
 
       try {
-        // プロセスプールからプロセスを取得
-        const interviewProcess = await processPool.acquire();
-        log(`プロセスプールから子プロセスを取得しました。Process PID: ${interviewProcess.pid}`);
+        // 一意のセッションIDを生成
+        const sessionId = uuidv4();
+        socket.interviewSessionId = sessionId;
 
-        // 子プロセスにネームスペースとメッセージを送信
-        const initMessage = { namespace, message: "start_interview" };
-        log(`子プロセスにメッセージを送信します: ${JSON.stringify(initMessage)}`);
-        interviewProcess.send(initMessage);
+        // プロセスマネージャーにメッセージを送信
+        log(`プロセスマネージャーにインタビュー開始メッセージを送信します。Session ID: ${sessionId}`);
+        const response = await processManager.sendMessage({
+          sessionId,
+          message: { command: "start_interview", namespace },
+        });
 
-        // 子プロセスからのメッセージを処理
-        const messageHandler = (response) => {
-          log(`親プロセスが子プロセスからのメッセージを受信: ${JSON.stringify(response)}`);
-
-          if (response.status === "ready") {
-            // 子プロセスの準備完了
-            log(`[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスの準備ができました [${namespace}]`);
-          } else if (response.response) {
-            // クライアントにメッセージを送信
-            log(`[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスからのメッセージ: ${response.response}`);
-            socket.emit("interview_result", response.response.trim());
-          }
-        };
-
-        // エラーハンドリング
-        const errorHandler = (err) => {
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスエラー: ${err.message} [${namespace}]`,
-            "error"
-          );
-          socket.emit("interview_result", `エラー: 子プロセスエラー: ${err.message}`);
-          socket.disconnect(true);
-        };
-
-        // 子プロセスの終了時の処理
-        const exitHandler = (code, signal) => {
-          log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスが終了しました。コード: ${code}, シグナル: ${signal} [${namespace}]`,
-            "warn"
-          );
-          socket.emit("interview_result", "インタビュープロセスが終了しました。");
-          socket.disconnect(true);
-        };
-
-        // イベントハンドラを登録
-        interviewProcess.on("message", messageHandler);
-        interviewProcess.on("error", errorHandler);
-        interviewProcess.on("exit", exitHandler);
-
-        // ソケットにプロセスとハンドラを保存（切断時に使用）
-        socket.interviewProcess = interviewProcess;
-        socket.messageHandler = messageHandler;
-        socket.errorHandler = errorHandler;
-        socket.exitHandler = exitHandler;
+        log(`AIプロセスからのレスポンスを受信しました。Session ID: ${sessionId}`);
+        socket.emit("interview_result", response);
       } catch (error) {
-        // エラーハンドリング
         log(
           `[ユーザー ${socket.id} (ログインID: ${loginID})] エラーが発生しました: ${error.message}`,
           "error"
@@ -159,7 +114,7 @@ function setupNamespace(namespace) {
       }
     });
 
-    socket.on("user_input", (message) => {
+    socket.on("user_input", async (message) => {
       resetInactivityTimeout();
       log(
         `[ユーザー ${socket.id} (ログインID: ${loginID})] メッセージ受信: ${message} [${namespace}]`
@@ -174,18 +129,23 @@ function setupNamespace(namespace) {
         return;
       }
 
-      if (socket.interviewProcess) {
-        // 子プロセスが終了していないか確認
-        if (socket.interviewProcess.connected) {
-          // メッセージを送信
-          socket.interviewProcess.send({ message });
-          log(`子プロセスにメッセージを送信しました: ${message}`);
-        } else {
+      if (socket.interviewSessionId) {
+        try {
+          const sessionId = socket.interviewSessionId;
+          log(`プロセスマネージャーにユーザー入力を送信します。Session ID: ${sessionId}, Message: ${message}`);
+          const response = await processManager.sendMessage({
+            sessionId,
+            message: { command: "user_input", message },
+          });
+
+          log(`AIプロセスからのレスポンスを受信しました。Session ID: ${sessionId}`);
+          socket.emit("interview_result", response);
+        } catch (error) {
           log(
-            `[ユーザー ${socket.id} (ログインID: ${loginID})] 子プロセスとの接続が切れています [${namespace}]`,
+            `[ユーザー ${socket.id} (ログインID: ${loginID})] エラーが発生しました: ${error.message}`,
             "error"
           );
-          socket.emit("interview_result", "エラー: インタビュープロセスとの通信ができません。");
+          socket.emit("interview_result", `エラー: ${error.message}`);
         }
       } else {
         log(
@@ -204,20 +164,15 @@ function setupNamespace(namespace) {
         `[ユーザー ${socket.id} (ログインID: ${loginID})] ユーザーが切断しました [${namespace}]`
       );
 
-      if (socket.interviewProcess) {
-        // イベントハンドラを解除
-        socket.interviewProcess.off("message", socket.messageHandler);
-        socket.interviewProcess.off("error", socket.errorHandler);
-        socket.interviewProcess.off("exit", socket.exitHandler);
-
-        // 子プロセスを解放
-        processPool.release(socket.interviewProcess);
-
-        // 参照を削除
-        socket.interviewProcess = null;
-        socket.messageHandler = null;
-        socket.errorHandler = null;
-        socket.exitHandler = null;
+      if (socket.interviewSessionId) {
+        // プロセスマネージャーにセッション終了を通知
+        processManager
+          .sendMessage({
+            sessionId: socket.interviewSessionId,
+            message: { command: "end_interview" },
+          })
+          .catch((err) => log(`セッション終了メッセージ送信エラー: ${err.message}`, "error"));
+        socket.interviewSessionId = null;
       }
       if (inactivityTimeout) {
         clearTimeout(inactivityTimeout);
@@ -238,4 +193,11 @@ app.use((err, req, res, __next) => {
 
 server.listen(SOCKET_IO_PORT, () => {
   console.log(`サーバーが起動し、ポート${SOCKET_IO_PORT}でリスニングしています`);
+});
+
+// システム終了時にプロセスマネージャーをシャットダウン
+process.on("SIGINT", () => {
+  console.log("プロセス終了信号を受信しました。シャットダウンします...");
+  processManager.shutdownAll();
+  process.exit();
 });

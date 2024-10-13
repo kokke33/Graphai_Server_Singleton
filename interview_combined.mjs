@@ -7,74 +7,52 @@ function removeAnsiEscapeCodes(text) {
   return stripAnsi(text);
 }
 
-// 子プロセス起動時のログ
 console.log("interview_combined.mjs が起動しました。");
 
-let interviewProcess;
+let interviewProcessMap = new Map(); // セッションIDとプロセスのマッピング
 
-// 親プロセスからネームスペース情報を受け取る
-let namespace = null;
-
+// 親プロセスからメッセージを受け取る
 process.on("message", (message) => {
-  console.log(`子プロセスでメッセージを受信: ${JSON.stringify(message)}`);
+  const { sessionId, command, namespace, message: userMessage } = message;
+  console.log(`メッセージを受信しました: ${JSON.stringify(message)}`);
 
-  if (message.namespace) {
-    namespace = message.namespace;
-    console.log(`ネームスペースを設定: ${namespace}`);
-  }
+  if (command === "start_interview") {
+    if (interviewProcessMap.has(sessionId)) {
+      process.send({ sessionId, error: "既にインタビューが開始されています。" });
+      return;
+    }
 
-  if (message.message === "start_interview") {
-    console.log(`インタビューを開始します。ネームスペース: ${namespace}`);
-
-    // 子プロセスでインタビューを開始
-    const graphaiCommand = "graphai"; // 必要に応じて絶対パスに変更
-
-    // ネームスペースに応じて適切なYAMLファイルを選択
+    // GraphAIコマンドの設定（必要に応じてパスを変更）
+    const graphaiCommand = "graphai";
     const yamlFileMap = {
       create: "./interview.yaml",
       answer: "./interview2.yaml",
       sechat: "./interview3.yaml",
     };
-
     const yamlFile = yamlFileMap[namespace];
 
     if (!yamlFile) {
       const errorMessage = `不明なネームスペース: ${namespace}`;
       console.error(errorMessage);
-      process.send({ response: errorMessage });
+      process.send({ sessionId, error: errorMessage });
       return;
     }
 
     const args = [yamlFile];
-
     console.log(`graphaiコマンドを実行します。Command: ${graphaiCommand}, Args: ${args}`);
 
-    interviewProcess = spawn(graphaiCommand, args, {
+    const aiProcess = spawn(graphaiCommand, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env, // 親プロセスの環境変数を継承
+      env: process.env,
     });
 
-    // エラーイベントのハンドリング
-    interviewProcess.on("error", (error) => {
-      const errorMessage = `子プロセスエラー: ${error.message}`;
-      console.error(errorMessage);
-      process.send({ response: errorMessage });
-    });
-
-    // プロセスが終了した場合のハンドリング
-    interviewProcess.on("exit", (code, signal) => {
-      const exitMessage = `graphaiプロセスが終了しました。コード: ${code}, シグナル: ${signal}`;
-      console.error(exitMessage);
-      process.send({ response: exitMessage });
-    });
-
-    // データのバッファリングと組み立て
+    // データのバッファリング
     let buffer = "";
 
     // 「? あなた:」から「AI: 」までの文字を削除する正規表現
     const removePromptRegex = /\? あなた:[\s\S]*?★AI回答/g;
 
-    interviewProcess.stdout.on("data", (data) => {
+    aiProcess.stdout.on("data", (data) => {
       buffer += data.toString();
 
       // ANSIエスケープコードを削除
@@ -89,7 +67,7 @@ process.on("message", (message) => {
 
         if (outputMessage) {
           // 完全なメッセージを親プロセスに送信
-          process.send({ response: outputMessage });
+          process.send({ sessionId, response: outputMessage });
           console.log(`親プロセスにメッセージを送信: ${outputMessage}`);
         }
 
@@ -98,39 +76,55 @@ process.on("message", (message) => {
       }
     });
 
-    // 標準エラーのデータを親プロセスに送信
-    interviewProcess.stderr.on("data", (data) => {
+    aiProcess.stderr.on("data", (data) => {
       const stderrMessage = removeAnsiEscapeCodes(data.toString()).trim();
       if (stderrMessage) {
         console.error(`stderr: ${stderrMessage}`);
-        process.send({ response: stderrMessage });
+        process.send({ sessionId, error: stderrMessage });
       }
     });
 
-  } else if (message.message) {
-    // ユーザー入力を子プロセスに送信
-    if (interviewProcess && interviewProcess.stdin.writable) {
-      console.log("子プロセスに書き込み:", message.message);
-      interviewProcess.stdin.write(`${message.message}\n`);
+    aiProcess.on("exit", (code, signal) => {
+      const exitMessage = `graphaiプロセスが終了しました。コード: ${code}, シグナル: ${signal}`;
+      console.error(exitMessage);
+      process.send({ sessionId, error: exitMessage });
+      interviewProcessMap.delete(sessionId);
+    });
+
+    // プロセスをマップに保存
+    interviewProcessMap.set(sessionId, aiProcess);
+    process.send({ sessionId, response: "インタビューが開始されました。" });
+  } else if (command === "user_input") {
+    const aiProcess = interviewProcessMap.get(sessionId);
+    if (aiProcess && aiProcess.stdin.writable) {
+      console.log(`AIプロセスにユーザー入力を送信します。Session ID: ${sessionId}, Message: ${userMessage}`);
+      aiProcess.stdin.write(`${userMessage}\n`);
     } else {
       const errorMessage = "インタビュープロセスが利用できません。";
       console.error(errorMessage);
-      process.send({ response: errorMessage });
+      process.send({ sessionId, error: errorMessage });
+    }
+  } else if (command === "end_interview") {
+    const aiProcess = interviewProcessMap.get(sessionId);
+    if (aiProcess) {
+      aiProcess.kill();
+      interviewProcessMap.delete(sessionId);
+      process.send({ sessionId, response: "インタビューが終了しました。" });
     }
   } else {
-    console.log("不明なメッセージを受信:", message);
+    console.log("不明なコマンドを受信:", message);
   }
 });
 
-// 子プロセスの未処理の例外をキャッチ
+// 未処理の例外をキャッチ
 process.on("uncaughtException", (err) => {
   console.error(`子プロセスで未処理の例外が発生: ${err.message}`);
 });
 
-// 子プロセスの終了イベントをハンドリング
+// 終了イベントをハンドリング
 process.on("exit", (code) => {
   console.log(`子プロセスが終了しました。コード: ${code}`);
 });
 
-// 親プロセスに準備完了を通知
+// 準備完了を通知
 process.send({ status: "ready" });
